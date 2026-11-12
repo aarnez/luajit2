@@ -676,7 +676,7 @@ static void rec_loop_jit(jit_State *J, TraceNo lnk, LoopEvent ev)
 /* Record ITERN. */
 static LoopEvent rec_itern(jit_State *J, BCReg ra, BCReg rb)
 {
-#if LJ_BE
+#if LJ_BE && !LJ_TARGET_S390X
   /* YAGNI: Disabled on big-endian due to issues with lj_vm_next,
   ** IR_HIOP, RID_RETLO/RID_RETHI and ra_destpair.
   */

@@ -102,6 +102,11 @@ static MSize CALLBACK_OFS2SLOT(MSize ofs)
 
 #define CALLBACK_MCODE_HEAD		52
 
+#elif LJ_TARGET_S390X
+
+#define CALLBACK_MCODE_HEAD		42
+#define CALLBACK_MCODE_SLOTSZ		8
+
 #else
 
 /* Missing support for this architecture. */
@@ -312,6 +317,64 @@ static void *callback_mcode_init(global_State *g, uint32_t *page)
     *p = MIPSI_B | ((page-p-1) & 0x0000ffffu);
     p++;
     *p++ = MIPSI_LI | MIPSF_T(RID_R1) | slot;
+  }
+  return p;
+}
+#elif LJ_TARGET_S390X
+static void *callback_mcode_init(global_State *g, uint8_t *page)
+{
+  uint8_t *p = page;
+  uintptr_t target = (uintptr_t)(void *)lj_vm_ffi_callback;
+  uintptr_t ug = (uintptr_t)(void *)g;
+  MSize slot;
+  /*
+  ** Head layout (42 bytes):
+  **   0: target pointer (8 bytes)
+  **   8: g pointer (8 bytes)
+  **  16: STG r14, 112(0,sp) (6 bytes) — save caller's return address
+  **  22: LARL r1, -22       (6 bytes) — r1 = page base
+  **  28: LG r14, 8(0,r1)   (6 bytes) — r14 = g
+  **  34: LG r1, 0(0,r1)    (6 bytes) — r1 = target
+  **  40: BR r1              (2 bytes)
+  **
+  ** The head saves the real r14 at the ABI register save slot 112(sp)
+  ** before loading g into r14.  vm_ffi_callback recovers it before
+  ** saveregs runs.
+  **
+  ** Each slot (8 bytes):
+  **   LGHI r0, slot    (4 bytes): A7 09 <imm16>
+  **   BRC 15, head+16  (4 bytes): A7 F4 <ri2>
+  */
+  /* target_ptr at offset 0. */
+  *(uintptr_t *)p = target; p += 8;
+  /* g_ptr at offset 8. */
+  *(uintptr_t *)p = ug; p += 8;
+  /* STG r14, 112(0,sp): E3 E0 F0 70 00 24. */
+  *p++ = 0xE3; *p++ = 0xE0; *p++ = 0xF0; *p++ = 0x70; *p++ = 0x00; *p++ = 0x24;
+  /* LARL r1, -22: C0 10 FF FF FF F5 (halfword offset = -11). */
+  *p++ = 0xC0; *p++ = 0x10;
+  *p++ = 0xFF; *p++ = 0xFF; *p++ = 0xFF; *p++ = 0xF5;
+  /* LG r14, 8(0,r1): E3 E0 10 08 00 04. */
+  *p++ = 0xE3; *p++ = 0xE0; *p++ = 0x10; *p++ = 0x08; *p++ = 0x00; *p++ = 0x04;
+  /* LG r1, 0(0,r1): E3 10 10 00 00 04. */
+  *p++ = 0xE3; *p++ = 0x10; *p++ = 0x10; *p++ = 0x00; *p++ = 0x00; *p++ = 0x04;
+  /* BR r1: 07 F1. */
+  *p++ = 0x07; *p++ = 0xF1;
+  lj_assertG(p - page == CALLBACK_MCODE_HEAD, "head size mismatch");
+  for (slot = 0; slot < CALLBACK_MAX_SLOT; slot++) {
+    /* LGHI r0, slot: A7 09 <slot_be16>. */
+    *p++ = 0xA7; *p++ = 0x09;
+    *p++ = (uint8_t)(slot >> 8); *p++ = (uint8_t)slot;
+    /* BRC 15, head+16: A7 F4 <ri2_be16>.
+    ** head+16 is the STG r14 instruction.  BRC offset is in halfwords.
+    */
+    {
+      uint8_t *insn = p;
+      intptr_t head_entry = (intptr_t)(page + 16);
+      int16_t ri2 = (int16_t)((head_entry - (intptr_t)insn) / 2);
+      *p++ = 0xA7; *p++ = 0xF4;
+      *p++ = (uint8_t)(ri2 >> 8); *p++ = (uint8_t)ri2;
+    }
   }
   return p;
 }
@@ -708,6 +771,9 @@ static void callback_conv_args(CTState *cts, lua_State *L)
 #if LJ_TARGET_MIPS64
 	  && !(isfp && nsp)
 #endif
+#if LJ_TARGET_S390X
+	  && !isfp  /* s390x: float in FPR uses high 32 bits, no adjustment. */
+#endif
 	 )
 	sp = (void *)((uint8_t *)sp + CTSIZE_PTR-cta->size);
       gcsteps += lj_cconv_tv_ct(cts, cta, 0, o++, sp);
@@ -763,7 +829,7 @@ static void callback_conv_result(CTState *cts, lua_State *L, TValue *o)
 	*(int32_t *)dp = ctr->size == 1 ? (int32_t)*(int8_t *)dp :
 					  (int32_t)*(int16_t *)dp;
     }
-#if LJ_TARGET_PPC && LJ_ARCH_BITS == 64
+#if (LJ_TARGET_PPC && LJ_ARCH_BITS == 64) || LJ_TARGET_S390X
     if (ctr->size <= 4 &&
        (ctype_isinteger_or_bool(ctr->info) || ctype_isenum(ctr->info))) {
       if (ctr->info & CTF_UNSIGNED)

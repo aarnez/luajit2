@@ -266,21 +266,34 @@
 |
 |// Decrement hashed hotcount and trigger trace recorder if zero.
 |.macro hotloop, reg
-|  lgr reg, PC   
-|  srlg reg, reg, 1
-|  nill reg, HOTCOUNT_PCMASK 
-|  afi reg, GG_DISP2HOT
+|  srlg reg, PC, 1
+|  lghi TMPR1, HOTCOUNT_PCMASK
+|  ngr reg, TMPR1			// 64-bit AND: mask to hotcount index.
+|  aghi reg, GG_DISP2HOT
 |  agr reg, DISPATCH
-|  lg TMPR1, (reg) 
-|  aghi TMPR1, -HOTCOUNT_LOOP 
-|  stg TMPR1, (reg) 
-|  jl ->vm_hotloop
+|  llgh TMPR1, 0(reg)			// Load 16-bit HotCount.
+|  aghi TMPR1, -HOTCOUNT_LOOP
+|  sth TMPR1, 0(reg)			// Store 16-bit HotCount.
+|  jgl ->vm_hotloop
 |.endmacro
 |
-|// Set current VM state.
+|// Decrement hashed hotcount and trigger trace compiler if zero.
+|.macro hotcall, reg
+|  srlg reg, PC, 1
+|  lghi TMPR1, HOTCOUNT_PCMASK
+|  ngr reg, TMPR1			// 64-bit AND: mask to hotcount index.
+|  aghi reg, GG_DISP2HOT
+|  agr reg, DISPATCH
+|  llgh TMPR1, 0(reg)			// Load 16-bit HotCount.
+|  aghi TMPR1, -HOTCOUNT_CALL
+|  sth TMPR1, 0(reg)			// Store 16-bit HotCount.
+|  jgl ->vm_hotcall
+|.endmacro
+|
+|// Set current VM state. vmstate is int32_t, use 32-bit store (sty).
 |.macro set_vmstate, st
 |  lghi TMPR1, ~LJ_VMST_..st
-|  stg TMPR1, DISPATCH_GL(vmstate)(DISPATCH)
+|  sty TMPR1, DISPATCH_GL(vmstate)(DISPATCH)
 |.endmacro
 |
 |// Synthesize binary floating-point constants.
@@ -1599,6 +1612,8 @@ static void build_subroutines(BuildCtx *ctx)
   |  brasl r14, ->vm_ .. func
   |  cfdbr RB, 0, f0
   |  jo ->fff_resf0
+  |  ltr RB, RB		// Result zero? Return float to preserve -0.0.
+  |  je ->fff_resf0
   |  llgfr RB, RB
   |  j ->fff_resi
   |.endmacro
@@ -1671,7 +1686,7 @@ static void build_subroutines(BuildCtx *ctx)
   |  j ->fff_res
   |
   |.macro math_minmax, name, cjmp
-  |  .ffunc name
+  |  .ffunc_1 name
   |  lghi RA, 2*8
   |  sllg TMPR1, RD, 3
   |  lg RB, 0(BASE)
@@ -1711,8 +1726,9 @@ static void build_subroutines(BuildCtx *ctx)
   |  j <5
   |.endmacro
   |
-  |  math_minmax math_min, jnh
-  |  math_minmax math_max, jnl
+  |  // Keep the accumulator only on a strict ordered compare (like minsd/maxsd).
+  |  math_minmax math_min, jl
+  |  math_minmax math_max, jh
   |
   |//-- String library -----------------------------------------------------
   |
@@ -2014,8 +2030,20 @@ static void build_subroutines(BuildCtx *ctx)
   |//-----------------------------------------------------------------------
   |
   |->vm_record:				// Dispatch target for recording phase.
-  |  stg r0, 0
-  |  stg r0, 0
+  |.if JIT
+  |  llgc RD, (DISPATCH_GL(hookmask))(DISPATCH)
+  |  tmll RD, HOOK_VMEVENT		// No recording while in vmevent.
+  |  jne >5
+  |  // Decrement the hookcount for consistency, but always call dispatch.
+  |  tmll RD, HOOK_ACTIVE
+  |  jne >1
+  |  tmll RD, LUA_MASKLINE|LUA_MASKCOUNT
+  |  je >1
+  |  ly TMPR0, (DISPATCH_GL(hookcount))(DISPATCH)
+  |  ahi TMPR0, -1
+  |  sty TMPR0, (DISPATCH_GL(hookcount))(DISPATCH)
+  |  j >1
+  |.endif
   |
   |->vm_rethook:			// Dispatch target for return hooks.
   |  llgc RD, (DISPATCH_GL(hookmask))(DISPATCH)
@@ -2060,33 +2088,33 @@ static void build_subroutines(BuildCtx *ctx)
   |
   |->vm_hotloop:			// Hot loop counter underflow.
   |.if JIT
-  |  lg LFUNC:RB, -16(BASE) 
-  |  cleartp LFUNC:RB 
-  |  lg RB, LFUNC:RB->pc 
-  |  llgc RD, (PC2PROTO(framesize))(RB) 
+  |  lg LFUNC:RB, -16(BASE)		// curr_topL(L): LFUNC from frame.
+  |  cleartp LFUNC:RB
+  |  lg RB, LFUNC:RB->pc
+  |  llgc RD, (PC2PROTO(framesize))(RB)
   |  sllg RD, RD, 3
-  |  la RD, 0(RD, BASE)
+  |  lay RD, 0(RD, BASE)		// RD = BASE + framesize*8
   |  lg L:RB, SAVE_L
   |  stg BASE, L:RB->base
-  |  stg RD, L:RB->top 
+  |  stg RD, L:RB->top
   |  lgr CARG2, PC
-  |  la CARG1, GG_DISP2J(DISPATCH)
-  |  stg L:RB, (DISPATCH_J(L))(DISPATCH)
+  |  lay CARG1, GG_DISP2J(DISPATCH)
+  |  stg L:RB, DISPATCH_J(L)(DISPATCH)
   |  stg PC, SAVE_PC
-  |  brasl r14, extern lj_trace_hot		// (jit_State *J, const BCIns *pc)
-  |  j <3
-  |.endif  
+  |  brasl r14, extern lj_trace_hot	// (jit_State *J, const BCIns *pc)
+  |  jg <3
+  |.endif
   |    
   |->vm_callhook:			// Dispatch target for call hooks.
   |  stg PC, SAVE_PC
   |.if JIT
-  |  j >1
+  |  jg >1
   |.endif
   |
   |->vm_hotcall:			// Hot call counter underflow.
   |.if JIT
   |  stg PC, SAVE_PC
-  |  oill PC, 1				// Marker for hot call.
+  |  oill PC, 1			// Marker for hot call.
   |1:
   |.endif
   |  sllg RD, NARGS:RD, 3
@@ -2101,7 +2129,7 @@ static void build_subroutines(BuildCtx *ctx)
   |  lghi TMPR0, 0
   |  stg TMPR0, SAVE_PC			// Invalidate for subsequent line hook.
   |.if JIT
-  |  nill PC, -2
+  |  nill PC, 0xfffe			// Clear hot call marker.
   |.endif
   |  lg BASE, L:RB->base
   |  lg RD, L:RB->top
@@ -2114,25 +2142,201 @@ static void build_subroutines(BuildCtx *ctx)
   |  br RB
   |
   |->cont_stitch:			// Trace stitching.
-  |  stg r0, 0
-  |  stg r0, 0
+  |  // BASE = base, RC = result, RB = mbase
+  |  lg TRACE:ITYPE, -40(RB)		// Save previous trace.
+  |  cleartp TRACE:ITYPE
+  |  llgf RD, SAVE_MULTRES
+  |  llgc RA, PC_RA
+  |  sllg RA, RA, 3
+  |  la RA, 0(RA, BASE)		// Call base.
+  |  ahi RD, -1
+  |  je >2
+  |1:  // Move results down.
+  |  lg TMPR1, 0(RC)
+  |  stg TMPR1, 0(RA)
+  |  aghi RC, 8
+  |  aghi RA, 8
+  |  ahi RD, -1
+  |  jne <1
+  |2:
+  |  llgc RC, PC_RA
+  |  llgc RD, PC_RB
+  |  ar RC, RD
+  |  sllg RC, RC, 3
+  |  lay RC, -8(RC, BASE)
+  |3:
+  |  clgr RC, RA
+  |  jh >9				// More results wanted?
+  |
+  |  ltgr TRACE:ITYPE, TRACE:ITYPE
+  |  je ->cont_nop
+  |  llgh TMPR0, TRACE:ITYPE->traceno
+  |  llgh RD, TRACE:ITYPE->link
+  |  cr RD, TMPR0
+  |  je ->cont_nop			// Blacklisted.
+  |  ltr RD, RD
+  |  je >4
+  |  llgfr RD, RD			// Zero-extend for BC_JLOOP.
+  |  jg ->vm_JLOOP			// Jump to stitched trace.
+  |4:
+  |  // Stitch a new trace to the previous trace.
+  |  sty TMPR0, DISPATCH_J(exitno)(DISPATCH)
+  |  lg L:RB, SAVE_L
+  |  stg BASE, L:RB->base
+  |  lgr CARG2, PC
+  |  lay CARG1, GG_DISP2J(DISPATCH)
+  |  stg L:RB, DISPATCH_J(L)(DISPATCH)
+  |  brasl r14, extern lj_dispatch_stitch	// (jit_State *J, const BCIns *pc)
+  |  lg BASE, L:RB->base
+  |  j ->cont_nop
+  |
+  |9:  // Fill up results with nil.
+  |  lghi TMPR1, LJ_TNIL
+  |  stg TMPR1, 0(RA)
+  |  aghi RA, 8
+  |  j <3
   |
   |->vm_profhook:			// Dispatch target for profiler hook.
-  |  stg r0, 0
-  |  stg r0, 0
+#if LJ_HASPROFILE
+  |  lg L:RB, SAVE_L
+  |  stg BASE, L:RB->base
+  |  lgr CARG2, PC
+  |  lgr CARG1, L:RB
+  |  brasl r14, extern lj_dispatch_profile	// (lua_State *L, const BCIns *pc)
+  |  lg BASE, L:RB->base
+  |  // HOOK_PROFILE is off again, so re-dispatch to dynamic instruction.
+  |  aghi PC, -4
+  |  j ->cont_nop
+#endif
   |
   |//-----------------------------------------------------------------------
   |//-- Trace exit handler -------------------------------------------------
   |//-----------------------------------------------------------------------
   |
-  |// Called from an exit stub with the exit number on the stack.
-  |// The 16 bit exit number is stored with two (sign-extended) push imm8.
+  |// Called from exit stubs. At entry: exitno = (r14-r0)/6.
   |->vm_exit_handler:
-  |  stg r0, 0
-  |  stg r0, 0
+  |.if JIT
+  |  aghi sp, -416
+  |  stmg r0, r15, 288(sp)
+  |  std f0, 160(sp)
+  |  std f1, 168(sp)
+  |  std f2, 176(sp)
+  |  std f3, 184(sp)
+  |  std f4, 192(sp)
+  |  std f5, 200(sp)
+  |  std f6, 208(sp)
+  |  std f7, 216(sp)
+  |  std f8, 224(sp)
+  |  std f9, 232(sp)
+  |  std f10, 240(sp)
+  |  std f11, 248(sp)
+  |  std f12, 256(sp)
+  |  std f13, 264(sp)
+  |  std f14, 272(sp)
+  |  std f15, 280(sp)
+  |  lgr DISPATCH, r11
+  |  agfi DISPATCH, -GG_DISP2G
+  |  // Store exitno.
+  |  sgr r0, r1
+  |  aghi r0, -6
+  |  msgfi r0,0x2aaaaaab
+  |  stfh r0, DISPATCH_J(exitno)(DISPATCH)
+  |  // Read parent trace number from vmstate, then set vmstate to EXIT.
+  |  llgf TMPR1, DISPATCH_GL(vmstate)(DISPATCH)
+  |  sty TMPR1, DISPATCH_J(parent)(DISPATCH)
+  |  lghi TMPR0, ~LJ_VMST_EXIT
+  |  sty TMPR0, DISPATCH_GL(vmstate)(DISPATCH)
+  |  lghi TMPR0, 0
+  |  stg TMPR0, 288(sp)
+  |  la TMPR0, 416(sp)
+  |  stg TMPR0, 408(sp)
+  |  lg L:RB, DISPATCH_GL(cur_L)(DISPATCH)
+  |  lg BASE, DISPATCH_GL(jit_base)(DISPATCH)
+  |  stg L:RB, DISPATCH_J(L)(DISPATCH)
+  |  stg BASE, L:RB->base
+  |  lghi TMPR0, 0
+  |  stg TMPR0, DISPATCH_GL(jit_base)(DISPATCH)
+  |  lay CARG1, GG_DISP2J(DISPATCH)
+  |  la CARG2, 160(sp)
+  |  brasl r14, extern lj_trace_exit
+  |  // Restore interpreter state from L->cframe.
+  |  lg TMPR1, L:RB->cframe
+  |  lghi TMPR0, -4
+  |  ngr TMPR1, TMPR0			// TMPR1 = cframe & CFRAME_RAWMASK
+  |  stg L:RB, 256(TMPR1)		// CFRAME_OFS_L = 256 = SAVE_L
+  |  lg BASE, L:RB->base
+  |  lg PC, 168(TMPR1)			// CFRAME_OFS_PC = 168 = SAVE_PC
+  |  lgr sp, TMPR1			// Restore sp from cframe.
+  |  j >1
+  |.endif
   |->vm_exit_interp:
-  |  stg r0, 0
-  |  stg r0, 0
+  |.if JIT
+  |  lg L:RB, SAVE_L
+  |  lgr DISPATCH, r11
+  |  agfi DISPATCH, -GG_DISP2G
+  |1:
+  |  clfi CRET1, -LUA_ERRERR
+  |  jgnl >9
+  |  stg BASE, L:RB->base
+  |  lghi TMPR0, 0
+  |  stg TMPR0, DISPATCH_GL(jit_base)(DISPATCH)
+  |  st CRET1, SAVE_MULTRES
+  |  set_vmstate INTERP
+  |  lg LFUNC:RB, -16(BASE)
+  |  cleartp LFUNC:RB
+  |  lg RB, LFUNC:RB->pc
+  |  lg KBASE, PC2PROTO(k)(RB)
+  |  // Modified copy of ins_next which handles function header dispatch, too.
+  |  llgc OP, 3(PC)
+  |  llgh RD, 0(PC)
+  |  llgc RA, 2(PC)
+  |  la PC, 4(PC)
+  |  lgf TMPR0, SAVE_MULTRES		// Load MULTRES (sign-extend to 64).
+  |  cghi TMPR0, -17			// Static dispatch?
+  |  je >5
+  |  clfi OP, BC_FUNCF			// Function header?
+  |  jl >3
+  |  clfi OP, BC_FUNCC+2			// Fast function?
+  |  jnl >4
+  |2:
+  |  llgfr RD, TMPR0			// RD = MULTRES (zero-extend to 64).
+  |3:
+  |  sllg TMPR1, OP, 3
+  |  lg TMPR1, 0(TMPR1, DISPATCH)
+  |  br TMPR1
+  |
+  |4:  // Check frame below fast function.
+  |  lg RC, -8(BASE)
+  |  tmll RC, FRAME_TYPE
+  |  jne <2				// Trace stitching continuation?
+  |  // Otherwise set KBASE for Lua function below fast function.
+  |  llgc RC, -2(RC)			// RA of call ins (big-endian: byte 2 at -2).
+  |  sllg RC, RC, 3			// RC = RA * 8.
+  |  lgr TMPR1, BASE
+  |  sgr TMPR1, RC			// TMPR1 = BASE - RA*8.
+  |  lg LFUNC:KBASE, -32(TMPR1)		// Load LFUNC below.
+  |  cleartp LFUNC:KBASE
+  |  lg KBASE, LFUNC:KBASE->pc
+  |  lg KBASE, PC2PROTO(k)(KBASE)
+  |  j <2
+  |
+  |5:  // Dispatch to static entry of original ins replaced by BC_JLOOP.
+  |  lg TMPR1, DISPATCH_J(trace)(DISPATCH)
+  |  sllg RD, RD, 3
+  |  lg TMPR1, 0(RD, TMPR1)		// TRACE:TMPR1 = trace[RD]
+  |  llgf TMPR0, TRACE:TMPR1->startins
+  |  srlg RD, TMPR0, 16			// RD = startins >> 16.
+  |  srlg RA, TMPR0, 8
+  |  llgcr RA, RA			// RA = (startins >> 8) & 0xff.
+  |  llgcr OP, TMPR0			// OP = startins & 0xff.
+  |  sllg TMPR1, OP, 3
+  |  lg TMPR1, GG_DISP2STATIC(TMPR1, DISPATCH)
+  |  br TMPR1
+  |9:
+  |  lcgfr CARG2, CRET1			// errcode = -CRET1.
+  |  lgr CARG1, L:RB
+  |  brasl r14, extern lj_err_trace
+  |.endif
   |
   |//-----------------------------------------------------------------------
   |//-- Math helper functions ----------------------------------------------
@@ -2200,32 +2404,128 @@ static void build_subroutines(BuildCtx *ctx)
 #ifdef LUA_USE_ASSERT
 #endif
   |
+  |// TValue *lj_vm_next(GCtab *t, uint32_t idx)
+  |// Next idx returned in r3.
+  |// Leaf function: uses 16..31(sp) of the caller's register save area
+  |// to return {val, key} for array slots.
   |->vm_next:
   |.if JIT
-  |  stg r0, 0 // NYI On big-endian.
-  |  stg r0, 0
+  |  llgfr CARG2, CARG2
+  |  llgf CARG4, TAB:CARG1->asize
+  |  lg CARG3, TAB:CARG1->array
+  |1:  // Traverse array part.
+  |  clr CARG2, CARG4; jhe >5		// Index points after array part?
+  |  sllg TMPR1, CARG2, 3
+  |  lg TMPR0, 0(TMPR1, CARG3)
+  |  cghi TMPR0, LJ_TNIL; je >2
+  |  stg TMPR0, 16(sp)			// Value.
+  |  setint TMPR0, CARG2
+  |  stg TMPR0, 24(sp)			// Key: array index as integer.
+  |  la CRET1, 16(sp)
+  |  ahi CARG2, 1
+  |  br r14
+  |2:  // Skip holes in array part.
+  |  ahi CARG2, 1
+  |  j <1
+  |
+  |5:  // Traverse hash part.
+  |  sr CARG2, CARG4
+  |6:
+  |  cl CARG2, TAB:CARG1->hmask; jh >9
+  |  llgfr TMPR1, CARG2
+  |  mghi TMPR1, #NODE
+  |  ag NODE:TMPR1, TAB:CARG1->node
+  |  lghi TMPR0, LJ_TNIL
+  |  cg TMPR0, NODE:TMPR1->val; je >7
+  |  ar CARG2, CARG4
+  |  ahi CARG2, 1
+  |  lgr CRET1, TMPR1			// Node has {val, key} layout.
+  |  br r14
+  |7:  // Skip holes in hash part.
+  |  ahi CARG2, 1
+  |  j <6
+  |
+  |9:  // End of iteration. Set the key to nil (not the value).
+  |  ar CARG2, CARG4
+  |  lghi TMPR0, LJ_TNIL
+  |  stg TMPR0, 24(sp)
+  |  la CRET1, 16(sp)
+  |  br r14
   |.endif
   |
   |//-----------------------------------------------------------------------
   |//-- FFI helper functions -----------------------------------------------
   |//-----------------------------------------------------------------------
   |
-  |// Handler for callback functions. Callback slot number in ah/al.
+  |// Handler for callback functions. Slot number in r0, g in r14.
+  |// The head already saved the real r14 (return address) at 112(sp).
   |->vm_ffi_callback:
   |.if FFI
   |.type CTSTATE, CTState, PC
-  |  saveregs
+  |  // At entry: r0 = slot, r14 = g, r2-r6 = GPR args, f0/f2/f4/f6 = FPR args.
+  |  // The caller's real return address was saved at 112(sp) by the head.
+  |  // Save g at 128(sp) — above saveregs range (48-127) — so it survives.
+  |  lgr TMPR1, CARG5			// Stash r6 (5th arg) in r1.
+  |  stg r14, 128(sp)			// Save g above saveregs range.
+  |  lg r14, 112(sp)			// Restore real r14 from ABI save slot.
+  |  saveregs				// Now saves correct r6-r15 (original r7, real r14).
+  |  lg RB, CFRAME_SPACE+128(sp)	// Load g from 128(sp_old) = (240+128)(sp_new).
   |  la DISPATCH, GG_G2DISP(RB)
   |  lg CTSTATE, GL:RB->ctype_state
-  |  llgcr RC, RC
-  |  stg RC, CTSTATE->cb.slot
-  |  
-  |  la RC, CFRAME_SIZE(sp)
+  |  st TMPR0, CTSTATE->cb.slot		// Save slot number from r0 (32-bit).
+  |  // Save GPR arguments to CTSTATE->cb.gpr[].
+  |  stg CARG1, CTSTATE->cb.gpr[0]
+  |  stg CARG2, CTSTATE->cb.gpr[1]
+  |  stg CARG3, CTSTATE->cb.gpr[2]
+  |  stg CARG4, CTSTATE->cb.gpr[3]
+  |  stg TMPR1, CTSTATE->cb.gpr[4]	// r6 was stashed in r1.
+  |  // Save FPR arguments to CTSTATE->cb.fpr[].
+  |  std f0, CTSTATE->cb.fpr[0]
+  |  std f2, CTSTATE->cb.fpr[1]
+  |  std f4, CTSTATE->cb.fpr[2]
+  |  std f6, CTSTATE->cb.fpr[3]
+  |  // Save pointer to stack args.
+  |  la TMPR1, CFRAME_SPACE+160(sp)	// Stack args start at caller's SP+160.
+  |  stg TMPR1, CTSTATE->cb.stack
+  |  // Call lj_ccallback_enter(CTState *cts, void *cf).
+  |  lgr CARG1, CTSTATE
+  |  stg CTSTATE, SAVE_PC		// Any value outside of bytecode is ok.
+  |  lgr CARG2, sp
+  |  stg CARG1, SAVE_L			// Temporarily use SAVE_L to stash CTSTATE.
+  |  brasl r14, extern lj_ccallback_enter	// (CTState *cts, void *cf)
+  |  // Returns lua_State * in r2.
+  |  lgr L:RB, CRET1
+  |  stg L:RB, SAVE_L
+  |  lg BASE, L:RB->base
+  |  lg RC, L:RB->top
+  |  lg DISPATCH, L:RB->glref
+  |  la DISPATCH, GG_G2DISP(DISPATCH)
+  |  lg LFUNC:RB, -16(BASE)
+  |  cleartp LFUNC:RB
+  |  sgr RC, BASE			// RC = top - base (frame size in bytes).
+  |  srlg NARGS:RD, RC, 3
+  |  aghi NARGS:RD, 1			// RD = nargs+1 = (top-base)/8 + 1.
+  |  set_vmstate INTERP
+  |  ins_callt
   |.endif
   |
   |->cont_ffi_callback:			// Return from FFI callback.
-  |  stg r0, 0
-  |  stg r0, 0
+  |.if FFI
+  |  // BASE = base, RC = result, RB = meta base
+  |  lgr TMPR1, RB			// Save meta base before RB is overwritten.
+  |  lg L:RB, SAVE_L
+  |  lg DISPATCH, L:RB->glref
+  |  stg BASE, L:RB->base
+  |  stg TMPR1, L:RB->top		// Restore L->top = meta base.
+  |  lg CTSTATE, GL:DISPATCH->ctype_state
+  |  stg L:RB, CTSTATE->L
+  |  lgr CARG1, CTSTATE
+  |  lgr CARG2, RC			// Result TValue pointer.
+  |  brasl r14, extern lj_ccallback_leave	// (CTState *cts, TValue *o)
+  |  lg CRET1, CTSTATE->cb.gpr[0]
+  |  ld f0, CTSTATE->cb.fpr[0]
+  |  j ->vm_leave_unw
+  |.endif
   |
   |->vm_ffi_call:			// Call C function via FFI.
   |  // Caveat: needs special frame unwinding, see below.
@@ -2589,8 +2889,8 @@ static void build_ins(BuildCtx *ctx, BCOp op, int defop)
   case BC_ISTYPE:
     |  ins_AD	// RA = src, RD = -type
     |  lghr RD, RD
-    |  sllg RA, RA, 3
-    |  lg RB, 0(RA, BASE)
+    |  sllg TMPR1, RA, 3
+    |  lg RB, 0(TMPR1, BASE)
     |  srag RB, RB, 47
     |  agr RB, RD
     |  jne ->vmeta_istype
@@ -3647,7 +3947,7 @@ static void build_ins(BuildCtx *ctx, BCOp op, int defop)
 
   case BC_ITERN:
     |.if JIT
-    |  hotloop RB // NYI: add hotloop, record BC_ITERN.
+    |  hotloop RB
     |.endif
     |->vm_IITERN:
     |  ins_A	// RA = base, (RB = nresults+1, RC = nargs+1 (2+1))
@@ -3726,8 +4026,23 @@ static void build_ins(BuildCtx *ctx, BCOp op, int defop)
     |  lghi TMPR0, BC_JMP
     |  stcy  TMPR0, PC_OP
     |  branchPC RD
+    |.if JIT
+    |  cli 3(PC), BC_ITERN
+    |  jne >6
+    |.endif
     |  mvi 3(PC), BC_ITERC
     |  j <1
+    |.if JIT
+    |6:  // Unpatch JLOOP.
+    |  lg TMPR1, DISPATCH_J(trace)(DISPATCH)
+    |  llgh RD, 0(PC)
+    |  sllg RD, RD, 3
+    |  lg TRACE:RD, 0(RD, TMPR1)
+    |  llgf TMPR0, TRACE:RD->startins
+    |  st TMPR0, 0(PC)
+    |  mvi 3(PC), BC_ITERC
+    |  j <1
+    |.endif
     break;
 
   case BC_VARG:
@@ -3943,16 +4258,16 @@ static void build_ins(BuildCtx *ctx, BCOp op, int defop)
     } else if (op == BC_JFORI) {
       |  branchPC RD
       |  llgh RD, PC_RD
-      |  jle =>BC_JLOOP
-      |1:
-      |6:
+      |  jgle =>BC_JLOOP
     } else if (op == BC_IFORL) {
       |  jh >7
       |6:
       |  branchPC RD
       |1:
     } else {
-      |  jle =>BC_JLOOP
+      |  jgle =>BC_JLOOP
+    }
+    if (op == BC_JFORI || op == BC_JFORL) {
       |1:
       |6:
     }
@@ -3975,11 +4290,11 @@ static void build_ins(BuildCtx *ctx, BCOp op, int defop)
     } else if (op == BC_JFORI) {
       |  branchPC RD
       |  llgh RD, PC_RD
-      |  jhe =>BC_JLOOP
+      |  jghe =>BC_JLOOP
     } else if (op == BC_IFORL) {
       |  jl <7
     } else {
-      |  jhe =>BC_JLOOP
+      |  jghe =>BC_JLOOP
     }
     |  j <6
     |9:  // Fallback to FP variant.
@@ -4016,11 +4331,11 @@ static void build_ins(BuildCtx *ctx, BCOp op, int defop)
     } else if (op == BC_JFORI) {
       |  branchPC RD
       |  llgh RD, PC_RD
-      |  jnl =>BC_JLOOP
+      |  jgnl =>BC_JLOOP
     } else if (op == BC_IFORL) {
       |  jl <7
     } else {
-      |  jnl =>BC_JLOOP
+      |  jgnl =>BC_JLOOP
     }
     |  j <6
     |
@@ -4048,7 +4363,7 @@ static void build_ins(BuildCtx *ctx, BCOp op, int defop)
     |  cghi RB, LJ_TNIL; je >1		// Stop if iterator returned nil.
     if (op == BC_JITERL) {
       |  stg RB, -8(RA)
-      |  j =>BC_JLOOP
+      |  jg =>BC_JLOOP
     } else {
       |  branchPC RD			// Otherwise save control var + branch.
       |  stg RB, -8(RA)
@@ -4073,8 +4388,25 @@ static void build_ins(BuildCtx *ctx, BCOp op, int defop)
     break;
 
   case BC_JLOOP:
-    |  stg r0, 0
-    |  stg r0, 0
+    |.if JIT
+    |  ins_AD	// RA = base (ignored), RD = traceno
+    |->vm_JLOOP:
+    |  // Load trace object and its mcode entry point.
+    |  lg TMPR1, DISPATCH_J(trace)(DISPATCH)
+    |  sllg RD, RD, 3
+    |  lg TRACE:RD, 0(RD, TMPR1)
+    |  lg RD, TRACE:RD->mcode
+    |  // Store jit_base and L for the trace.
+    |  stg BASE, DISPATCH_GL(jit_base)(DISPATCH)
+    |  lg L:TMPR1, SAVE_L
+    |  stg L:TMPR1, DISPATCH_GL(tmpbuf.L)(DISPATCH)
+    |  // Set up JIT registers: RID_JGL (r11) = global_State.
+    |  lay r11, GG_DISP2G(DISPATCH)
+    |  // Move interpreter BASE (r13) to JIT RID_BASE (r7).
+    |  lgr RB, BASE
+    |  aghi sp, -168	// SPS_FIXED*4 = 42*4 = 168
+    |  br RD
+    |.endif
     break;
 
   case BC_JMP:
@@ -4094,7 +4426,7 @@ static void build_ins(BuildCtx *ctx, BCOp op, int defop)
 
   case BC_FUNCF:
     |.if JIT
-    |  stg r0, 0
+    |  hotcall RB
     |.endif
   case BC_FUNCV:  /* NYI: compiled vararg functions. */
     | // Fall through. Assumes BC_IFUNCF/BC_IFUNCV follow and ins_AD is a no-op.
@@ -4118,7 +4450,7 @@ static void build_ins(BuildCtx *ctx, BCOp op, int defop)
     |2:
     if (op == BC_JFUNCF) {
       |  llgh RD, PC_RD
-      |  j =>BC_JLOOP
+      |  jg =>BC_JLOOP
     } else {
       |  ins_next
     }
@@ -4174,7 +4506,7 @@ static void build_ins(BuildCtx *ctx, BCOp op, int defop)
     |2:
     if (op == BC_JFUNCV) {
       |  llgh RD, PC_RD
-      |  j =>BC_JLOOP
+      |  jg =>BC_JLOOP
     } else {
       |  lg KBASE, (PC2PROTO(k)-4)(PC)
       |  ins_next

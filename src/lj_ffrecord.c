@@ -589,7 +589,7 @@ static void LJ_FASTCALL recff_getfenv(jit_State *J, RecordFFData *rd)
 
 static void LJ_FASTCALL recff_next(jit_State *J, RecordFFData *rd)
 {
-#if LJ_BE
+#if LJ_BE && !LJ_TARGET_S390X
   /* YAGNI: Disabled on big-endian due to issues with lj_vm_next,
   ** IR_HIOP, RID_RETLO/RID_RETHI and ra_destpair.
   */

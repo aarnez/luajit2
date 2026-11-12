@@ -355,6 +355,10 @@ void lj_trace_initstate(global_State *g)
   J->k64[LJ_K64_VM_EXIT_HANDLER].u64 = (uintptr_t)lj_ptr_sign((void *)lj_vm_exit_handler, 0);
   J->k64[LJ_K64_VM_EXIT_INTERP].u64 = (uintptr_t)lj_ptr_sign((void *)lj_vm_exit_interp, 0);
 #endif
+#if LJ_TARGET_S390X
+  J->k64[LJ_K64_VM_EXIT_HANDLER].u64 = (uintptr_t)(void *)lj_vm_exit_handler;
+  J->k64[LJ_K64_VM_EXIT_INTERP].u64 = (uintptr_t)(void *)lj_vm_exit_interp;
+#endif
 }
 
 /* Free everything associated with the JIT compiler state. */

@@ -306,6 +306,9 @@ enum {
 #elif LJ_TARGET_MIPS
   DW_REG_SP = 29,
   DW_REG_RA = 31,
+#elif LJ_TARGET_S390X
+  DW_REG_SP = 15,
+  DW_REG_RA = 14,
 #else
 #error "Unsupported target architecture"
 #endif
@@ -383,6 +386,8 @@ static const ELFheader elfhdr_template = {
   .machine = 20,
 #elif LJ_TARGET_MIPS
   .machine = 8,
+#elif LJ_TARGET_S390X
+  .machine = 22,
 #else
 #error "Unsupported target architecture"
 #endif
@@ -534,9 +539,15 @@ static void LJ_FASTCALL gdbjit_ehframe(GDBJITctx *ctx)
     DSV(-(int32_t)sizeof(uintptr_t));  /* Data alignment factor. */
     DB(DW_REG_RA);		/* Return address register. */
     DB(1); DB(DW_EH_PE_textrel|DW_EH_PE_udata4);  /* Augmentation data. */
+#if LJ_TARGET_S390X
+    /* CFA is caller's sp + 160. RA (r14) is described in the FDE. */
+    DB(DW_CFA_def_cfa); DUV(DW_REG_SP); DUV(160);
+#else
     DB(DW_CFA_def_cfa); DUV(DW_REG_SP); DUV(sizeof(uintptr_t));
+#endif
 #if LJ_TARGET_PPC
     DB(DW_CFA_offset_extended_sf); DB(DW_REG_RA); DSV(-1);
+#elif LJ_TARGET_S390X
 #else
     DB(DW_CFA_offset|DW_REG_RA); DUV(1);
 #endif
@@ -590,6 +601,19 @@ static void LJ_FASTCALL gdbjit_ehframe(GDBJITctx *ctx)
       DB(DW_CFA_offset|30); DUV(2);
       for (i = 23; i >= 16; i--) { DB(DW_CFA_offset|i); DUV(26-i); }
       for (i = 30; i >= 20; i -= 2) { DB(DW_CFA_offset|32|i); DUV(42-i); }
+    }
+#elif LJ_TARGET_S390X
+    {
+      int i;
+      /* r6-r15 saved by the interpreter at CFA-160+8*i. */
+      for (i = 6; i <= 15; i++) { DB(DW_CFA_offset|i); DUV(20-i); }
+      /* f8-f15 saved at CFA-224+8*(i-8). DWARF regs 24-27 = f8,f10,f12,f14
+      ** and 28-31 = f9,f11,f13,f15.
+      */
+      for (i = 0; i <= 3; i++) {
+	DB(DW_CFA_offset|(24+i)); DUV(28-2*i);
+	DB(DW_CFA_offset|(28+i)); DUV(27-2*i);
+      }
     }
 #else
 #error "Unsupported target architecture"

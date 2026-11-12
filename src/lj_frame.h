@@ -281,6 +281,8 @@ enum { LJ_CONT_TAILCALL, LJ_CONT_FFI_CALLBACK };  /* Special continuations. */
 #define CFRAME_OFS_PC		168
 #define CFRAME_OFS_MULTRES	160
 #define CFRAME_SIZE		240
+ /* CFA offset in JIT code: 160 byte ABI bias + SPS_FIXED*4 added by BC_JLOOP. */
+#define CFRAME_SIZE_JIT		(CFRAME_SIZE + 160 + 168)
 /*
 ** TODO: it would be good if we always decoded param*8 like
 ** the RISC architectures do. If so then SHIFT_MULTRES will

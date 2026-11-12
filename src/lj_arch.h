@@ -501,13 +501,14 @@
 /* On s390x, _Unwind_SetGR can only be used with call-saved registers.
    Use %r7 as EH return register; value will be moved into %r2 by the handler.  */
 #define LJ_TARGET_EHRETREG	7
+#define LJ_TARGET_EHRAREG	14
 #define LJ_TARGET_JUMPRANGE	32	/* +-2^32 = +-4GB (32-bit, halfword aligned) */
 #define LJ_TARGET_MASKSHIFT	1
 #define LJ_TARGET_MASKROT	1
+#define LJ_TARGET_UNIFYROT	1	/* Want only IR_BROL (rotate left). */
 #define LJ_TARGET_UNALIGNED	1
 #define LJ_ARCH_NUMMODE		LJ_NUMMODE_DUAL
 #define LJ_TARGET_GC64		1
-#define LJ_ARCH_NOJIT		1	/* NYI */
 
 #else
 #error "No target architecture defined"

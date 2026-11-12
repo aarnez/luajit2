@@ -809,7 +809,7 @@ static void snap_restoredata(jit_State *J, GCtrace *T, ExitState *ex,
 	  *(float *)dst = (float)*(double *)src;
 	  return;
 	}
-#else
+#elif !LJ_TARGET_S390X
 	if (LJ_BE && sz == 4) src++;
 #endif
       } else
